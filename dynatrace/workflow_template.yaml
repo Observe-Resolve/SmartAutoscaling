@@ -1,0 +1,708 @@
+metadata:
+  version: "1"
+  dependencies:
+    apps:
+      - id: dynatrace.automations
+        version: ^1.2020.0
+      - id: dynatrace.kubernetes.connector
+        version: ^1.1.1-dev.20250715T142345+f13e2279
+      - id: dynatrace.ownership
+        version: ^1.7.24-dev.20250716T112211+8f1c89b3
+      - id: dynatrace.slack
+        version: ^3.0.3-dev.20250715T112820+167f5e34
+  inputs:
+    - type: connection
+      schema: app:dynatrace.kubernetes.connector:connection
+      targets:
+        - tasks.apply_configurations_1.connection
+        - tasks.apply_configurations_2.connection
+    - type: connection
+      schema: app:dynatrace.slack:connection
+      targets:
+        - tasks.send_message_team_cpu.connection
+        - tasks.send_message_team_memory.connection
+workflow:
+  title: Smart Autoscaling Workflow
+  tasks:
+    get_cpu_max:
+      name: get_cpu_max
+      description: Make use of Dynatrace Grail data in your workflow.
+      action: dynatrace.automations:execute-dql-query
+      input:
+        query: |-
+          fetch spans
+          |filter in(dt.entity.cloud_application, {{ result("merge_ownership_separate_mem_cpu").cpu_filter }} )
+          | filter request.is_root_span
+          | filter duration > 500ms
+          | join [ timeseries cpu= avg( dt.kubernetes.container.cpu_usage  ), by:{k8s.pod.name,k8s.workload.name} ]  ,   on: { right[k8s.pod.name] ==  left[k8s.pod.name]},  fields: { cpu } 
+          | filter isNotNull(cpu)
+          | fieldsAdd cpumax= arrayMax(cpu)
+          | fields cpumax, dt.entity.cloud_application,k8s.pod.name,dt.kubernetes.workload.kind,k8s.deployment.name
+          | dedup dt.entity.cloud_application
+          | fields workloadid= dt.entity.cloud_application, podname=k8s.pod.name, deploymentname= k8s.deployment.name, kind= dt.kubernetes.workload.kind,cpumax
+      position:
+        x: -2
+        y: 6
+      predecessors:
+        - merge_ownership_separate_mem_cpu
+      conditions:
+        states:
+          merge_ownership_separate_mem_cpu: OK
+        custom: '{{result("merge_ownership_separate_mem_cpu").cpu_filter != ""}}'
+    get_owners_1:
+      name: get_owners_1
+      description: Retrieves entity and extracts ownership data from it.
+      action: dynatrace.ownership:get-ownership-from-entity
+      input:
+        entityIds: |-
+          
+          {% for sleep in result("parse_result").configs %}
+              {{ sleep.workloadid }},
+          {% endfor %}
+        responsibilities:
+          - Development
+          - Security
+          - Operations
+          - Infrastructure
+          - Line of Business
+          - Not defined
+      position:
+        x: 0
+        y: 4
+      predecessors:
+        - parse_result
+      conditions:
+        states:
+          parse_result: OK
+        custom: '{{result("parse_result").configs | length > 0 }}'
+    parse_result:
+      name: parse_result
+      description: Build a custom task running js Code
+      action: dynatrace.automations:run-javascript
+      input:
+        script: >-
+          // optional import of sdk modules
+
+          import { execution } from '@dynatrace-sdk/automation-utils';
+
+          type infoSleep = {
+            namespace: string
+            workload: string
+            clustername: string
+            owner : string
+            podname: string
+            containername:string
+            worloadid: string
+            coef_memory: double
+            coef_cpu: double
+            var_cpu: double
+            var_memory: double
+            memory_ratio: double
+            cpu_ratio: double
+            ismemory: Boolean
+            iscpu: Boolean
+          }
+
+          type Result = {
+            configs: infoOwner[]
+          }
+
+          var resultat=Array<infoSleep> = new Array();
+
+          export default async function () {
+           const ex = await execution();
+            console.log('Automated script execution on behalf of', ex.trigger);
+            var result = await ex.result('get_response_time_and_cpu_memory')
+
+            for (const workload of result.records )
+            {
+                var iscpu=false;
+                var ismemory=false;
+                if( workload.coef_cpu>0.5 && workload.var_cpu>0.1 && workload.cpu_ratio>0.6)
+                {
+                   iscpu=true;   
+                }
+                if( workload.coef_mem>0.5 && workload.var_memory>0.1 && workload.memory_ratio>0.6)
+                {
+                   ismemory=true;   
+                }
+             
+             
+                    
+                let sleppresult: sleppInfo = {
+                workload: workload.workloadName,
+                clustername: workload.clusterName,
+                namespace: workload.namespaceName,
+                owner: workload.owner,
+                podname: workload.podName,
+                containername: workload.containername,
+                workloadid : workload.workloadid,
+                coef_memory:workload.coef_mem, 
+                coef_cpu: workload.coef_cpu,
+                cpu_ratio:workload.cpu_ratio,
+                memory_ratio:   workload.memory_ratio,
+                var_cpu:  workload.var_cpu,
+                var_memory:workload.var_memory,
+                ismemory: ismemory,
+                iscpu: iscpu
+              }
+              
+              resultat.push(sleppresult)
+            }
+            const res: Result = { configs: resultat}
+            return res;
+          }
+      position:
+        x: 0
+        y: 3
+      predecessors:
+        - get_response_time_and_cpu_memory
+      conditions:
+        states:
+          get_response_time_and_cpu_memory: OK
+        custom: '{{ result("get_response_time_and_cpu_memory")["records"] | length > 0
+          }}'
+    get_memory_max:
+      name: get_memory_max
+      description: Make use of Dynatrace Grail data in your workflow.
+      action: dynatrace.automations:execute-dql-query
+      input:
+        query: |-
+          fetch spans
+          |filter in(dt.entity.cloud_application, {{ result("merge_ownership_separate_mem_cpu").mem_filter }} )
+          | filter request.is_root_span
+          | filter duration > 500ms
+          | join [ timeseries memory= avg( dt.kubernetes.container.memory_working_set  ), by:{k8s.pod.name,k8s.workload.name} ]  ,   on: { right[k8s.pod.name] ==  left[k8s.pod.name]},  fields: { memory } 
+          | filter isNotNull(memory)
+          | fieldsAdd memorymax= arrayMax(memory)
+          | fields memorymax, dt.entity.cloud_application,k8s.pod.name,dt.kubernetes.workload.kind,k8s.deployment.name
+          | dedup dt.entity.cloud_application
+          | fields workloadid= dt.entity.cloud_application, podname=k8s.pod.name, deploymentname= k8s.deployment.name, kind= dt.kubernetes.workload.kind,memorymax
+      position:
+        x: 0
+        y: 6
+      predecessors:
+        - merge_ownership_separate_mem_cpu
+      conditions:
+        states:
+          merge_ownership_separate_mem_cpu: OK
+        custom: '{{result("merge_ownership_separate_mem_cpu").mem_filter != ""}}'
+    generate_hpa_cpu:
+      name: generate_hpa_cpu
+      description: Run custom JavaScript code.
+      action: dynatrace.automations:run-javascript
+      input:
+        script: >-
+          import { execution } from '@dynatrace-sdk/automation-utils';
+
+
+
+          type cpuScaleConfig = {
+            namespace: string
+            workload: string
+            clustername: string
+            owner: string
+            podname: string
+            containername:string
+            worloadid: string
+            avgcpu: double
+            avgThreshold: double
+            cpu_ratio: double
+            slackChannel: string
+            hpayaml:string
+          }
+
+          type Result = {
+            cpu_records: cpuScaleConfig[]
+
+            
+          }
+
+          var  resultat_cpu= Array<cpuScaleConfig>();
+
+
+          var cpu_filter="";
+
+          var mem_filter="";
+
+          export default async function ({ execution_id }) {
+
+            const ex = await execution(execution_id);
+            console.log('Automated script execution on behalf of', ex.trigger);
+
+            var result = await ex.result('merge_ownership_separate_mem_cpu');
+            var cpuAvg=  await ex.result('get_cpu_max');
+           
+            for (const workload of result.cpu_records )
+            {
+                var channel="";
+                for(const avg of cpuAvg.records)
+                {
+                 
+                    if(avg.workloadid==workload.workloadid)
+                    {
+                      var last=avg.cpumax
+
+                      var threshold=last*0.70
+                      let hpayaml="apiVersion: autoscaling/v2\n";
+                      hpayaml+="kind: HorizontalPodAutoscaler\n";
+                      hpayaml+="metadata:\n   name: hpa-"+ workload.workload+"\n";
+                      hpayaml+="   namespace: "+workload.namespace+"\n";
+                      hpayaml+="spec:\n   scaleTargetRef:\n     apiVersion: apps/v1\n";
+                      hpayaml+="     kind: Deployment\n     name:"+workload.workload+"\n";
+                      hpayaml+="   minReplicas:1\n   maxReplicas:5\n";
+                      hpayaml+="   metrics:\n";
+                      hpayaml+="      - type: Resource:\n        resource:\n          name: cpu\n          target:\n";
+                      hpayaml+="            type: Utilization\n            averageUtilization:"+Math.round(threshold)+"\n";
+
+                      let sleppresult: cpuScale = {
+                        workload: workload.workload,
+                        clustername: workload.clustername,
+                        namespace: workload.namespace,
+                        owner: workload.owner,
+                        podname: workload.podname,
+                        containername: workload.containername,
+                        workloadid : workload.workloadid,
+                        slackChannel : workload.slackChannel,
+                        cpu_ratio: workload.cpu_ratio,
+                        avgcpu: Math.round(last),
+                        avgThreshold: Math.round(threshold),
+                        hpayaml: hpayaml
+                      };
+                      resultat_cpu.push(sleppresult);
+                          
+                    }
+                }
+              }
+              
+                   
+              
+
+           
+            
+            const res: Result = { cpu_records: resultat_cpu}
+              return res;
+
+          }
+      position:
+        x: -2
+        y: 7
+      predecessors:
+        - get_cpu_max
+      conditions:
+        states:
+          get_cpu_max: OK
+    generate_hpa_mem:
+      name: generate_hpa_mem
+      description: Run custom JavaScript code.
+      action: dynatrace.automations:run-javascript
+      input:
+        script: >-
+          import { execution } from '@dynatrace-sdk/automation-utils';
+
+
+
+          type memScaleConfig = {
+            namespace: string
+            workload: string
+            clustername: string
+            owner: string
+            podname: string
+            containername:string
+            worloadid: string
+            avgmem: double
+            avgThreshold: double
+            mem_ratio: double
+            slackChannel: string
+            hpayaml: string
+          }
+
+          type Result = {
+            mem_records: memScaleConfig[]
+
+            
+          }
+
+          var  resultat_mem= Array<memScaleConfig>();
+
+
+          var cpu_filter="";
+
+          var mem_filter="";
+
+          export default async function ({ execution_id }) {
+
+            const ex = await execution(execution_id);
+            console.log('Automated script execution on behalf of', ex.trigger);
+
+            var result = await ex.result('merge_ownership_separate_mem_cpu');
+            var memAvg=  await ex.result('get_memory_max');
+           
+            for (const workload of result.cpu_records )
+            {
+                var channel="";
+                for(const avg of memAvg.records)
+                {
+                
+                 
+                    if(avg.workloadid==workload.workloadid)
+                    {
+                      var last=avg.memorymax
+                      
+                    
+                      var threshold=Math.round((last*0,70)/1000000);
+
+                      let hpayaml="apiVersion: autoscaling/v2\n";
+                      hpayaml+="kind: HorizontalPodAutoscaler\n";
+                      hpayaml+="metadata:\n   name: hpa-"+ workload.workload+"\n";
+                      hpayaml+="   namespace: "+workload.namespace+"\n";
+                      hpayaml+="spec:\n   scaleTargetRef:\n     apiVersion: apps/v1\n";
+                      hpayaml+="     kind: Deployment\n     name:"+workload.workload+"\n";
+                      hpayaml+="   minReplicas:1\n   maxReplicas:5\n";
+                      hpayaml+="   metrics:\n";
+                      hpayaml+="      - type: Resource:\n        resource:\n          name: memory\n          target:\n";
+                      hpayaml+="            type: Utilization\n            averageUtilization:"+Math.round(threshold)+"\n";
+
+                      let sleppresult: memScaleConfig = {
+                        workload: workload.workload,
+                        clustername: workload.clustername,
+                        namespace: workload.namespace,
+                        owner: workload.owner,
+                        podname: workload.podname,
+                        containername: workload.containername,
+                        workloadid : workload.workloadid,
+                        slackChannel : workload.slackChannel,
+                        mem_ratio: workload.mem_ratio,
+                        avgmem: Math.round(last/1000000),
+                        avgThreshold:  threshold,
+                        hpayaml: hpayaml
+                      };
+                      resultat_mem.push(sleppresult);
+                          
+                    }
+                  }
+                }
+              
+                   
+              }
+
+           
+            
+            const res: Result = { mem_records: resultat_mem}
+              return res;
+
+          }
+      position:
+        x: 0
+        y: 7
+      predecessors:
+        - get_memory_max
+      conditions:
+        states:
+          get_memory_max: OK
+    send_message_team_cpu:
+      name: send_message_team_cpu
+      description: Send a message to a Slack workspace
+      action: dynatrace.slack:slack-send-message
+      input:
+        channel: "{{  _.item.slackChannel }}"
+        message: >-
+          *HPA Assistant*
+
+          Hello,  
+
+          we could provide a better response time and ressource utilization with
+          the following HPA:
+
+          - Namespace: *{{  _.item.namespace  }}* and workload:
+          *{{  _.item.workload  }}*
+            Content of the HPA: 
+             ```{{  _.item.hpayaml }}```
+        reaction: []
+        connection: ""
+        workflowID: "{{ execution().workflow.id }}"
+        channelType: expression
+        executionID: "{{ execution().id }}"
+        executionDate: "{{ execution().started_at }}"
+        appendToThread: false
+        replyBroadcast: false
+        selectedRequestType: 0
+        attachmentToggleValue: none
+      position:
+        x: -3
+        y: 8
+      predecessors:
+        - generate_hpa_cpu
+      conditions:
+        states:
+          generate_hpa_cpu: OK
+      concurrency: 1
+      withItems: item in  {{ result("generate_hpa_cpu").cpu_records }}
+    apply_configurations_1:
+      name: apply_configurations_1
+      description: Apply a configuration change to a resource or create new Kubernetes
+        resources
+      action: dynatrace.kubernetes.connector:apply
+      input:
+        resource: "{{  _.item.hpayaml }}"
+        connection: ""
+      position:
+        x: -1
+        y: 8
+      predecessors:
+        - generate_hpa_cpu
+      conditions:
+        states:
+          generate_hpa_cpu: OK
+      concurrency: 1
+      withItems: item in  {{ result("generate_hpa_cpu").cpu_records }}
+    apply_configurations_2:
+      name: apply_configurations_2
+      description: Apply a configuration change to a resource or create new Kubernetes
+        resources
+      action: dynatrace.kubernetes.connector:apply
+      input:
+        resource: "{{  _.item.hpayaml }}"
+        connection: ""
+      position:
+        x: 1
+        y: 8
+      predecessors:
+        - generate_hpa_mem
+      conditions:
+        states:
+          generate_hpa_mem: OK
+      concurrency: 1
+      withItems: item in {{ result("generate_hpa_mem").mem_records }}
+    send_message_team_memory:
+      name: send_message_team_memory
+      description: Send a message to a Slack workspace
+      action: dynatrace.slack:slack-send-message
+      input:
+        channel: "{{  _.item.slackChannel }}"
+        message: >-
+          *HPA Assistant*
+
+          Hello,  
+
+          we could provide a better response time and ressource utilization with
+          the following HPA:
+
+          - Namespace: *{{  _.item.namespace  }}* and workload:
+          *{{  _.item.workload  }}*
+            Content of the HPA: 
+             ```{{  _.item.hpayaml }}```
+        reaction: []
+        connection: ""
+        workflowID: "{{ execution().workflow.id }}"
+        channelType: expression
+        executionID: "{{ execution().id }}"
+        executionDate: "{{ execution().started_at }}"
+        appendToThread: false
+        replyBroadcast: false
+        selectedRequestType: 0
+        attachmentToggleValue: none
+      position:
+        x: 2
+        y: 8
+      predecessors:
+        - generate_hpa_mem
+      conditions:
+        states:
+          generate_hpa_mem: OK
+      concurrency: 1
+      withItems: item in {{ result("generate_hpa_mem").mem_records }}
+    get_response_time_and_cpu_memory:
+      name: get_response_time_and_cpu_memory
+      description: Executes DQL query
+      action: dynatrace.automations:execute-dql-query
+      input:
+        query: >2-
+           fetch dt.entity.container_group_instance
+           | fields id, container.id = id, container.name = entity.name, ipAddress, containerizationType, containerImageName, containerProperties, cluster.id = belongs_to[dt.entity.kubernetes_cluster], namespace.id = belongs_to[dt.entity.cloud_application_namespace], workloadid = belongs_to[dt.entity.cloud_application], pod.id = belongs_to[dt.entity.cloud_application_instance],  namespaceName,  workloadName, podName
+           | filter isNotNull(cluster.id)
+           | fieldsAdd Appnamespace = in(namespaceName, "dynatrace","kube-system","falco","kyverno","gmp-system","cert-manager","kuma-system")
+           | filter not Appnamespace
+           | lookup [
+                 fetch dt.entity.kubernetes_cluster, from: -30m
+                 | fields id, clusterName = entity.name, cluster.distribution = kubernetesDistribution, cluster.cluster_id = kubernetesClusterId, cluster.app_enabled = appEnabled
+                 | limit 10000
+                 ], sourceField:cluster.id, lookupField:id, fields:{clusterName,cluster.distribution,cluster.cluster_id,cluster.app_enabled}
+           | lookup [
+               timeseries { result_memory=avg(dt.kubernetes.container.memory_working_set), result_cpu= avg(dt.kubernetes.container.cpu_usage)},  by:{k8s.workload.name,k8s.pod.name}
+             ], sourceField:workloadName, lookupField:k8s.workload.name, fields:{result_memory,result_cpu}
+           | lookup  [
+               fetch dt.entity.cloud_application, from: -30m
+               | fieldsAdd kubernetesAnnotations,clusterId=clustered_by[`dt.entity.kubernetes_cluster`]
+               | filter cloudApplicationDeploymentTypes!="KUBERNETES_CRON_JOB"
+               | fieldsAdd owner= if(isNotNull(kubernetesAnnotations[dt.owner]),kubernetesAnnotations[dt.owner],else: "NA")
+           ], sourceField:workloadid, lookupField:id, fields:{owner,annotations = kubernetesAnnotations, clusterId }
+           | lookup [
+               fetch spans
+               | filter request.is_root_span==true
+               | makeTimeseries percentile=percentile(duration,99) , by:{k8s.deployment.name,k8s.pod.name}
+           ], sourceField:podName, lookupField:k8s.pod.name, fields:{percentile}
+            | fieldsAdd total_memory= arraySize(result_memory),sum_array_memory= arraySum(result_memory),total_cpu= arraySize(result_cpu),sum_array_cpu= arraySum(result_cpu)
+           | fieldsAdd mean_memory= sum_array_memory/total_memory, mean_cpu=sum_array_cpu/total_cpu
+           | fieldsAdd div_memory=result_memory[] - mean_memory, div_cpu=result_cpu[] - mean_cpu
+           | fieldsAdd cor_mem=record(memory=result_memory[], percentile=percentile[]), cor_cpu=record(cpu=result_cpu[], percentile=percentile[])
+           | expand cor_mem
+           | expand cor_cpu
+           | fieldsAdd containers=splitString(container.name, " ")
+           | fieldsAdd container=containers[1]
+           | filter not contains (container,"istio")
+           | summarize {coef_mem=correlation(cor_mem[memory] , cor_mem[percentile]),var_memory=avg(arrayAvg(div_memory)),var_cpu=avg(arrayAvg(div_cpu)),coef_cpu=correlation(cor_cpu[cpu] , cor_cpu[percentile]) ,response=avg(arrayAvg(percentile))*0.001, avg(arrayAvg(result_memory)), avg(arrayAvg(result_cpu)) }, by:{podName, container,namespaceName,workloadName,workloadid,owner,clusterName,clusterId,annotations}
+           | filter isNotNull(coef_cpu)
+           | filter isNotNull(coef_mem)
+           | filter coef_mem>0.7 or coef_cpu>0.7
+           | filter var_cpu> 0.1 or var_memory>0.1 or response> 1000
+      position:
+        x: 0
+        y: 2
+      predecessors: []
+      conditions:
+        states: {}
+    merge_ownership_separate_mem_cpu:
+      name: merge_ownership_separate_mem_cpu
+      description: Build a custom task running js Code
+      action: dynatrace.automations:run-javascript
+      input:
+        script: >-
+          import { execution } from '@dynatrace-sdk/automation-utils';
+
+
+          type memScale = {
+            namespace: string
+            workload: string
+            clustername: string
+            owner: string
+            podname: string
+            containername:string
+            worloadid: string
+            coef_memory: double
+            var_memory: double
+            memory_ratio: double
+            slackChannel: string
+          }
+
+          type cpuScale = {
+            namespace: string
+            workload: string
+            clustername: string
+            owner: string
+            podname: string
+            containername:string
+            worloadid: string
+            coef_cpu: double
+            var_cpu: double
+            cpu_ratio: double
+            slackChannel: string
+          }
+
+          type Result = {
+            mem_records: memScale[]
+            cpu_records: cpuScale[]
+            mem_filter: string
+            cpu_filter: string
+          }
+
+          var  resultat_cpu= Array<cpuScale>();
+
+          var  resultat_memory= Array<memScale>();
+
+
+          var cpu_filter="";
+
+          var mem_filter="";
+
+          export default async function ({ execution_id }) {
+
+            const ex = await execution(execution_id);
+            console.log('Automated script execution on behalf of', ex.trigger);
+
+            var result = await ex.result('parse_result');
+            var contactdetails=  await ex.result('get_owners_1');
+           
+            for (const workload of result.configs )
+            {
+                var channel="";
+                for(const own of contactdetails.owners)
+                {
+                  
+                  if(own.identifier==workload.owner)
+                  {
+                    const contactDetails = own.contactDetails;
+                    if(contactDetails != undefined && contactDetails.length>0) 
+                    {
+                      channel=contactDetails[0].slackChannel;
+                      console.log(contactDetails[0].slackChannel);
+                   }
+                  }        
+                }
+               if(channel !="" )
+               {
+                 
+                  if(workload.iscpu )
+                  {
+                     let sleppresult: cpuScale = {
+                        workload: workload.workload,
+                        clustername: workload.clustername,
+                        namespace: workload.namespace,
+                        owner: workload.owner,
+                        podname: workload.podname,
+                        containername: workload.containername,
+                        workloadid : workload.workloadid,
+                        slackChannel : channel,
+                        coef_cpu: workload.coef_cpu,
+                        cpu_ratio:workload.cpu_ratio,
+                        var_cpu:  workload.var_cpu
+
+                      };
+                      resultat_cpu.push(sleppresult);
+                      cpu_filter=cpu_filter+ "\""+  workload.workloadid +"\""+","
+                    }
+                    if(workload.ismemory )
+                    {
+                     let sleppresult: memScale = {
+                        workload: workload.workload,
+                        clustername: workload.clustername,
+                        namespace: workload.namespace,
+                        owner: workload.owner,
+                        podname: workload.podname,
+                        containername: workload.containername,
+                        workloadid : workload.workloadid,
+                        slackChannel : channel,
+                        coef_memory:workload.coef_mem, 
+                        memory_ratio:   workload.memory_ratio,
+                        var_memory:workload.var_memory
+                      }; 
+                      resultat_memory.push(sleppresult);
+                      mem_filter=mem_filter+ "\""+  workload.workloadid +"\""+","
+                    }
+                   
+              }
+            }
+            if(mem_filter.length>1)
+              mem_filter=mem_filter.slice(0, -1);
+            if(cpu_filter.length>1)
+              cpu_filter=cpu_filter.slice(0,-1);
+            
+            const res: Result = { mem_records: resultat_memory, cpu_records:resultat_cpu , mem_filter: mem_filter,cpu_filter:cpu_filter };
+            return res;
+
+          }
+      position:
+        x: 0
+        y: 5
+      predecessors:
+        - get_owners_1
+      conditions:
+        states:
+          get_owners_1: OK
+  description: ""
+  trigger: {}
+  schemaVersion: 3
+  result: null
+  input: {}
+  hourlyExecutionLimit: 1000
+  type: STANDARD

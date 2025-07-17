@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: edge-connect-hpa
+  namespace: dynatrace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: edge-connect-hpa
+rules:
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list","patch","update","create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: edge-connect-hpa
+roleRef:
+  kind: ClusterRole
+  name: edge-connect-hpa
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+  - kind: ServiceAccount
+    name: edge-connect-hpa
+    namespace: dynatrace
+---
+apiVersion: dynatrace.com/v1alpha2
+kind: EdgeConnect
+metadata:
+  name: isitobservable-predectivescaling
+  namespace: dynatrace
+spec:
+  apiServer: API_URL_TO_REPLACE
+  serviceAccountName: edge-connect-hpa
+  replicas: 1
+  oauth:
+    provisioner: true
+    clientSecret: edgeconnect-oauth
+    endpoint: https://SSO_URL_TO_REPLACE
+    resource: "URN_TO_REPLACE"
+  kubernetesAutomation:
+    enabled: true
