@@ -107,7 +107,7 @@ workflow:
             configs: infoOwner[]
           }
 
-          var resultat=Array<infoSleep> = new Array();
+          var resultat: Array<infoSleep> = new Array();
 
           export default async function () {
            const ex = await execution();
@@ -126,9 +126,9 @@ workflow:
                 {
                    ismemory=true;   
                 }
-             
-             
-                    
+          
+          
+          
                 let sleppresult: sleppInfo = {
                 workload: workload.workloadName,
                 clustername: workload.clusterName,
@@ -146,7 +146,7 @@ workflow:
                 ismemory: ismemory,
                 iscpu: iscpu
               }
-              
+          
               resultat.push(sleppresult)
             }
             const res: Result = { configs: resultat}
@@ -214,8 +214,8 @@ workflow:
 
           type Result = {
             cpu_records: cpuScaleConfig[]
-
-            
+          
+          
           }
 
           var  resultat_cpu= Array<cpuScaleConfig>();
@@ -232,13 +232,13 @@ workflow:
 
             var result = await ex.result('merge_ownership_separate_mem_cpu');
             var cpuAvg=  await ex.result('get_cpu_max');
-           
+          
             for (const workload of result.cpu_records )
             {
                 var channel="";
                 for(const avg of cpuAvg.records)
                 {
-                 
+          
                     if(avg.workloadid==workload.workloadid)
                     {
                       var last=avg.cpumax
@@ -270,16 +270,16 @@ workflow:
                         hpayaml: hpayaml
                       };
                       resultat_cpu.push(sleppresult);
-                          
+          
                     }
                 }
               }
-              
-                   
-              
-
-           
-            
+          
+          
+          
+          
+          
+          
             const res: Result = { cpu_records: resultat_cpu}
               return res;
 
@@ -319,8 +319,8 @@ workflow:
 
           type Result = {
             mem_records: memScaleConfig[]
-
-            
+          
+          
           }
 
           var  resultat_mem= Array<memScaleConfig>();
@@ -337,19 +337,19 @@ workflow:
 
             var result = await ex.result('merge_ownership_separate_mem_cpu');
             var memAvg=  await ex.result('get_memory_max');
-           
+          
             for (const workload of result.cpu_records )
             {
                 var channel="";
                 for(const avg of memAvg.records)
                 {
-                
-                 
+          
+          
                     if(avg.workloadid==workload.workloadid)
                     {
                       var last=avg.memorymax
-                      
-                    
+          
+          
                       var threshold=Math.round((last*0,70)/1000000);
 
                       let hpayaml="apiVersion: autoscaling/v2\n";
@@ -378,16 +378,16 @@ workflow:
                         hpayaml: hpayaml
                       };
                       resultat_mem.push(sleppresult);
-                          
+          
                     }
                   }
                 }
-              
-                   
+          
+          
               }
-
-           
-            
+          
+          
+          
             const res: Result = { mem_records: resultat_mem}
               return res;
 
@@ -622,13 +622,13 @@ workflow:
 
             var result = await ex.result('parse_result');
             var contactdetails=  await ex.result('get_owners_1');
-           
+          
             for (const workload of result.configs )
             {
                 var channel="";
                 for(const own of contactdetails.owners)
                 {
-                  
+          
                   if(own.identifier==workload.owner)
                   {
                     const contactDetails = own.contactDetails;
@@ -641,7 +641,7 @@ workflow:
                 }
                if(channel !="" )
                {
-                 
+          
                   if(workload.iscpu )
                   {
                      let sleppresult: cpuScale = {
@@ -679,14 +679,14 @@ workflow:
                       resultat_memory.push(sleppresult);
                       mem_filter=mem_filter+ "\""+  workload.workloadid +"\""+","
                     }
-                   
+          
               }
             }
             if(mem_filter.length>1)
               mem_filter=mem_filter.slice(0, -1);
             if(cpu_filter.length>1)
               cpu_filter=cpu_filter.slice(0,-1);
-            
+          
             const res: Result = { mem_records: resultat_memory, cpu_records:resultat_cpu , mem_filter: mem_filter,cpu_filter:cpu_filter };
             return res;
 
